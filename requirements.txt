@@ -7,3 +7,4 @@ crewai[tools]
 pysqlite3-binary
 exa_py
 langchain-community
+aliyah-sdk
