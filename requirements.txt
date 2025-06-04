@@ -1,0 +1,9 @@
+streamlit
+langchain
+langchain-groq
+langchain_google_genai
+crewai
+crewai[tools]
+pysqlite3-binary
+exa_py
+langchain-community
