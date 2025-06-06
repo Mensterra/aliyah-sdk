@@ -12,14 +12,14 @@ class NoApiKeyException(Exception):
     def __init__(
         self,
         message="Could not initialize Aaliyah client - API Key is missing."
-        + "\n\t    Find your API key at https://app.mensterra.com/settings/projects",
+        + "\n\t    Find your API key at https://app.mensterra.com/api-keys",
     ):
         super().__init__(message)
 
 
 class InvalidApiKeyException(Exception):
     def __init__(self, api_key, endpoint):
-        message = f"API Key is invalid: {{{api_key}}}.\n\t    Find your API key at {endpoint}/settings/projects"
+        message = f"API Key is invalid: {{{api_key}}}.\n\t    Find your API key at {endpoint}/api-keys"
         super().__init__(message)
 
 

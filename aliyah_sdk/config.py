@@ -58,6 +58,7 @@ class Config:
     # but allow overriding.
     EXPORTER_ENDPOINT: str = os.getenv("ALIYAH_EXPORTER_ENDPOINT") or os.getenv("AALIYAH_EXPORTER_ENDPOINT", f"{endpoint}/v1/traces")
     METRICS_ENDPOINT: str = os.getenv("ALIYAH_METRICS_ENDPOINT") or os.getenv("AALIYAH_METRICS_ENDPOINT", f"{endpoint}/v1/metrics")
+    LOGS_ENDPOINT: str = os.getenv("ALIYAH_LOGS_ENDPOINT") or os.getenv("AALIYAH_LOGS_ENDPOINT", f"{endpoint}/v1/logs/upload/")  # Add this
 
     # === Monitoring/Telemetry Configuration ===
     # Settings for the OpenTelemetry SDK within the agent's process
@@ -83,6 +84,7 @@ class Config:
     # Use the logging level determined above
     LOG_LEVEL = LOG_LEVEL # <-- Assign the class attribute
     log_level = LOG_LEVEL  # Add instance-style access for compatibility
+    logs_endpoint = LOGS_ENDPOINT 
 
     # === OpenTelemetry Configuration (Advanced) ===
     # Allow users to provide custom OTel components if needed
@@ -104,6 +106,8 @@ class Config:
     exporter_endpoint = EXPORTER_ENDPOINT
     metrics_endpoint = METRICS_ENDPOINT
 
+    # Update your Config.configure method in aliyah_sdk/config.py
+
     @classmethod
     def configure(
         cls,
@@ -119,14 +123,17 @@ class Config:
         auto_init: Optional[bool] = None,
         skip_auto_end_session: Optional[bool] = None,
         env_data_opt_out: Optional[bool] = None,
-        log_level: Optional[Union[str, int]] = None, # This parameter *overrides* the class attribute if provided
+        log_level: Optional[Union[str, int]] = None,
         fail_safe: Optional[bool] = None,
         prefetch_jwt_token: Optional[bool] = None,
         exporter = None,
         processor = None,
         exporter_endpoint: Optional[str] = None,
         metrics_endpoint: Optional[str] = None,
-        **kwargs # Accept any other kwargs
+        logs_endpoint: Optional[str] = None,
+        agent_id: Optional[int] = None,
+        agent_name: Optional[str] = None,
+        **kwargs
     ):
         """Configure settings from kwargs, overriding environment variables and defaults"""
 
@@ -145,6 +152,13 @@ class Config:
         if app_url is not None:
             cls.app_url = app_url
 
+        # 🔥 ADD AGENT CONFIGURATION
+        if agent_id is not None:
+            cls.agent_id = agent_id
+
+        if agent_name is not None:
+            cls.agent_name = agent_name
+
         if exporter_endpoint is not None:
             cls.EXPORTER_ENDPOINT = exporter_endpoint
             cls.exporter_endpoint = exporter_endpoint
@@ -152,6 +166,10 @@ class Config:
         if metrics_endpoint is not None:
             cls.METRICS_ENDPOINT = metrics_endpoint
             cls.metrics_endpoint = metrics_endpoint
+
+        if logs_endpoint is not None:
+            cls.LOGS_ENDPOINT = logs_endpoint
+            cls.logs_endpoint = logs_endpoint
 
         if max_wait_time is not None:
             cls.MAX_WAIT_TIME = max_wait_time
@@ -197,10 +215,10 @@ class Config:
                     cls.LOG_LEVEL = getattr(logging, log_level_str)
                     cls.log_level = getattr(logging, log_level_str)
                 else:
-                    cls.LOG_LEVEL = logging.INFO # Default if string is invalid
+                    cls.LOG_LEVEL = logging.INFO
                     cls.log_level = logging.INFO
             else:
-                cls.LOG_LEVEL = log_level # Assume it's already an int
+                cls.LOG_LEVEL = log_level
                 cls.log_level = log_level
 
         if fail_safe is not None:
@@ -217,19 +235,21 @@ class Config:
         if processor is not None:
             cls.processor = processor
 
+        # 🔥 UPDATE THE UNKNOWN KWARGS CHECK
         unknown_kwargs = set(kwargs.keys()) - {
             'api_key', 'endpoint', 'app_url', 'max_wait_time', 'export_flush_interval',
             'max_queue_size', 'default_tags', 'instrument_llm_calls', 'auto_start_session',
             'auto_init', 'skip_auto_end_session', 'env_data_opt_out', 'log_level',
             'fail_safe', 'prefetch_jwt_token', 'exporter', 'processor',
-            'exporter_endpoint', 'metrics_endpoint'
+            'exporter_endpoint', 'metrics_endpoint', 'logs_endpoint',
+            'agent_id', 'agent_name'  # 🔥 ADD THESE
         }
         if unknown_kwargs:
-             try:
-                 from .logging import logger as sdk_logger
-                 sdk_logger.warning(f"Unknown configuration parameters passed to Config.configure: {list(unknown_kwargs)}")
-             except ImportError:
-                 logging.warning(f"Unknown configuration parameters passed to Config.configure: {list(unknown_kwargs)}")
+            try:
+                from .logging import logger as sdk_logger
+                sdk_logger.warning(f"Unknown configuration parameters passed to Config.configure: {list(unknown_kwargs)}")
+            except ImportError:
+                logging.warning(f"Unknown configuration parameters passed to Config.configure: {list(unknown_kwargs)}")
 
     @classmethod
     def dict(cls):

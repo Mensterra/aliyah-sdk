@@ -52,7 +52,6 @@ class Client:
         self._initialized = False
         self.config = Config()
 
-
     def init(self, **kwargs):
         try:
             self.config = Config()
@@ -61,12 +60,13 @@ class Client:
             agent_id = kwargs.pop('agent_id', None)
             agent_name = kwargs.pop('agent_name', None)
             
-            # 🔥 STORE THEM IN THE CONFIG INSTANCE
+            # Store them in the config instance
             if agent_id is not None:
                 self.config.agent_id = agent_id
             if agent_name is not None:
                 self.config.agent_name = agent_name
             
+            # Configure with remaining kwargs (including instrument_llm_calls)
             Config.configure(**kwargs)
             
             if not Config.api_key:
@@ -83,13 +83,14 @@ class Client:
                 "project_id": "default"
             }
 
-            # Pass agent_id and agent_name to TracingCore
+            # 🔥 IMPORTANT: Pass the config instance, not just individual params
+            # This ensures instrument_llm_calls gets picked up
             TracingCore.initialize_from_config(
-                self.config,
+                self.config,  # Pass the entire config
                 jwt=project_response["token"], 
                 project_id=project_response.get("project_id"),
-                agent_id=agent_id,  # 🔥 ADD THIS
-                agent_name=agent_name  # 🔥 ADD THIS
+                agent_id=agent_id,
+                agent_name=agent_name
             )
 
             self._initialized = True  
@@ -101,7 +102,7 @@ class Client:
 
             session = None
             if self.config.auto_start_session:
-                from legacy import start_session
+                from aliyah_sdk.legacy import start_session  # Fixed import
 
                 # Include agent_id and agent_name in session tags
                 session_tags = list(self.config.default_tags) if self.config.default_tags else []

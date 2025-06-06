@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aliyah-sdk"
-version = "0.1.1" 
+version = "0.1.2" 
 
 authors = [
     { name="Mensterra", email="support@mensterra.com" },
@@ -42,6 +42,11 @@ dependencies = [
     # OpenTelemetry OTLP HTTP Exporter Dependencies
     "opentelemetry-exporter-otlp-proto-http",
 
+    # OpenTelemetry Instrumentations for LLM Providers
+    "opentelemetry-instrumentation-openai",
+    "opentelemetry-instrumentation-anthropic",
+    "opentelemetry-instrumentation-google-generativeai",
+
     # General Purpose Libraries
     "pydantic",
     "typing-extensions",
@@ -67,6 +72,41 @@ dependencies = [
     "watchfiles",
 ]
 
+# Optional dependencies for advanced features
+[project.optional-dependencies]
+# All LLM instrumentations (for users who want everything)
+all-llm = [
+    "opentelemetry-instrumentation-openai",
+    "opentelemetry-instrumentation-anthropic", 
+    "opentelemetry-instrumentation-google-generativeai",
+    "opentelemetry-instrumentation-bedrock",
+    "opentelemetry-instrumentation-cohere",
+    "opentelemetry-instrumentation-langchain",
+    "opentelemetry-instrumentation-llamaindex",
+]
+
+# Individual provider options
+openai = ["opentelemetry-instrumentation-openai"]
+anthropic = ["opentelemetry-instrumentation-anthropic"]
+google = ["opentelemetry-instrumentation-google-generativeai"]
+aws = ["opentelemetry-instrumentation-bedrock"]
+cohere = ["opentelemetry-instrumentation-cohere"]
+
+# Framework instrumentations
+frameworks = [
+    "opentelemetry-instrumentation-langchain",
+    "opentelemetry-instrumentation-llamaindex",
+]
+
+# Development dependencies
+dev = [
+    "pytest",
+    "pytest-cov",
+    "black",
+    "isort",
+    "mypy",
+    "pre-commit",
+]
 
 [tool.setuptools]
 [tool.setuptools.packages.find]

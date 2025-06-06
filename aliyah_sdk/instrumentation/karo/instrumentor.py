@@ -8,7 +8,7 @@ It traces agents, tools, and memory operations.
 from typing import Collection, List, Optional, Any, Tuple, Dict
 import logging
 import time
-
+from opentelemetry import trace
 from opentelemetry.instrumentation.instrumentor import BaseInstrumentor
 from opentelemetry.trace import get_tracer, SpanKind, Tracer
 from opentelemetry.trace.status import Status, StatusCode
@@ -123,6 +123,7 @@ class KaroInstrumentor(BaseInstrumentor):
     """
 
     _instrumented_methods = [] # Keep track of what was successfully instrumented
+    _enabled_instrumentors = []  # Track which instrumentors enabled
 
     def instrumentation_dependencies(self) -> Collection[str]:
         """Return packages required for instrumentation."""
@@ -133,6 +134,9 @@ class KaroInstrumentor(BaseInstrumentor):
         if not KARO_AVAILABLE:
             logger.warning("Karo framework not found. Instrumentation skipped.")
             return
+        
+        # Auto-enable provider instrumentors first
+        self._auto_enable_provider_instrumentors(kwargs)
 
         tracer_provider = kwargs.get("tracer_provider")
         tracer = get_tracer(LIBRARY_NAME, LIBRARY_VERSION, tracer_provider)
@@ -220,6 +224,11 @@ class KaroInstrumentor(BaseInstrumentor):
             get_agent_run_attributes
         )
         self._instrument_method(
+            "karo.providers.base_provider", "BaseProvider", "generate_response",
+            _create_provider_generate_wrapper(tracer, karo_metrics),
+            get_provider_generate_attributes
+        )
+        self._instrument_method(
             "karo.tools.base_tool", "BaseTool", "run",
             _create_tool_run_wrapper(tracer, karo_metrics),
             get_tool_run_attributes
@@ -234,19 +243,7 @@ class KaroInstrumentor(BaseInstrumentor):
             _create_memory_query_wrapper(tracer, karo_metrics),
             get_memory_query_attributes
         )
-        self._instrument_method(
-            "karo.providers.base_provider", "BaseProvider", "generate_response",
-            _create_provider_generate_wrapper(tracer, karo_metrics),
-            get_provider_generate_attributes
-        )
-
-        # TODO: Implement wrappers for specific provider streaming methods if they exist
-        # For example, if anthropic_provider.py had an _stream method:
-        # self._instrument_method(
-        #     "karo.providers.anthropic_provider", "AnthropicProvider", "_stream",
-        #      _create_anthropic_stream_wrapper(tracer, karo_metrics), # You'd implement this
-        #      get_anthropic_stream_attributes # You'd implement this
-        # )
+    
 
 
     def _instrument_method(self, package, class_name, method_name, wrapper_factory, attribute_handler):
@@ -264,6 +261,41 @@ class KaroInstrumentor(BaseInstrumentor):
             )
         except Exception as e:
             logger.error(f"Error wrapping {full_path}: {e}", exc_info=True)
+
+    def _auto_enable_provider_instrumentors(self, kwargs):
+        """Automatically enable LLM provider instrumentors for Karo providers."""
+        tracer_provider = kwargs.get("tracer_provider")
+        meter_provider = kwargs.get("meter_provider")
+        
+        # Map of instrumentors to try enabling
+        instrumentors_to_enable = [
+            ("opentelemetry.instrumentation.openai", "OpenAIInstrumentor"),
+            ("opentelemetry.instrumentation.anthropic", "AnthropicInstrumentor"), 
+            ("opentelemetry.instrumentation.google_generativeai", "GoogleGenerativeAIInstrumentor"),
+            # Add more as they become available
+        ]
+        
+        for module_name, class_name in instrumentors_to_enable:
+            try:
+                module = __import__(module_name, fromlist=[class_name])
+                instrumentor_class = getattr(module, class_name)
+                instrumentor = instrumentor_class()
+                
+                if not instrumentor.is_instrumented_by_opentelemetry:
+                    instrumentor.instrument(
+                        tracer_provider=tracer_provider,
+                        meter_provider=meter_provider
+                    )
+                    self._enabled_instrumentors.append(instrumentor)
+                    provider_name = class_name.replace("Instrumentor", "")
+                    logger.debug(f"✅ {provider_name} instrumentation enabled for Karo providers")
+                    
+            except ImportError:
+                provider_name = class_name.replace("Instrumentor", "")
+                logger.debug(f"📦 {provider_name} instrumentation not available - install with: pip install opentelemetry-instrumentation-{provider_name.lower()}")
+            except Exception as e:
+                provider_name = class_name.replace("Instrumentor", "")
+                logger.warning(f"⚠️ Could not enable {provider_name} instrumentation: {e}")
 
 
     def _uninstrument(self, **kwargs):
@@ -286,6 +318,16 @@ class KaroInstrumentor(BaseInstrumentor):
         self._instrumented_methods = [] # Clear the list
         logger.info("Successfully removed Karo framework instrumentation")
 
+         # Also uninstrument provider instrumentors we enabled
+        for instrumentor in self._enabled_instrumentors:
+            try:
+                instrumentor.uninstrument()
+                logger.debug(f"Uninstrumented {instrumentor.__class__.__name__}")
+            except Exception as e:
+                logger.debug(f"Failed to uninstrument {instrumentor.__class__.__name__}: {e}")
+        
+        self._enabled_instrumentors = []
+
 
 # --- Wrapper Factories (passed to _instrument_method) ---
 # Each factory creates a wrapper function that takes (wrapped, instance, args, kwargs)
@@ -299,78 +341,62 @@ def _create_agent_run_wrapper(tracer: Tracer, metrics: Dict[str, Any]):
 
     def wrapper(attribute_handler): # Accepts the attribute handler
         def _wrapper(wrapped, instance, args, kwargs):
-            # Span name from instance type or config
+            
             span_name = f"karo.agent.{getattr(instance.config, 'name', instance.__class__.__name__)}.run" if hasattr(instance, 'config') else f"karo.agent.{instance.__class__.__name__}.run"
+            
+            
             attributes = {SpanAttributes.AALIYAH_SPAN_KIND: AaliyahSpanKindValues.AGENT.value}
             status_code = StatusCode.OK
             error_type = None
             error_message = None
 
             with tracer.start_as_current_span(span_name, kind=SpanKind.INTERNAL, attributes=attributes) as span:
-                # Record start time for duration metric
                 start_time = time.time()
                 try:
-                    # Set input attributes before execution
                     input_attrs = attribute_handler(args=args, kwargs=kwargs, instance=instance)
+
+                    
                     for k, v in input_attrs.items():
-                         span.set_attribute(k, v)
+                        span.set_attribute(k, v)
 
-                    # Record metric count (optional, can be done at start or end)
+                    # Record metric count
                     if agent_run_counter:
-                         agent_run_counter.add(1)
+                        agent_run_counter.add(1)
 
-                    # Call the original method
                     return_value = wrapped(*args, **kwargs)
 
-                    # Set output attributes after execution
-                    output_attrs = attribute_handler(return_value=return_value, instance=instance)
-                    for k, v in output_attrs.items():
-                         span.set_attribute(k, v)
 
-                    # Set status based on return value (check for AgentErrorSchema)
+                    # 🔍 DEBUG: Check output attribute handler
+                    output_attrs = attribute_handler(return_value=return_value, instance=instance)
+                    
+                    for k, v in output_attrs.items():
+                        span.set_attribute(k, v)
+
+                    # Check success status
                     if isinstance(return_value, AgentErrorSchema):
-                         status_code = StatusCode.ERROR
-                         error_type = return_value.error_type
-                         error_message = return_value.error_message
-                    # Note: BaseAgent.run currently always returns something, either schema or error schema
+                        status_code = StatusCode.ERROR
+                        error_type = return_value.error_type
+                        error_message = return_value.error_message
+                        
+                    else:
+                        print(f"🔍 KARO: Agent succeeded")
 
                 except Exception as e:
                     status_code = StatusCode.ERROR
                     error_type = e.__class__.__name__
                     error_message = str(e)
 
-                    # Record exception on span
+
                     span.record_exception(e)
                     span.set_attribute(CoreAttributes.ERROR_TYPE, error_type)
                     span.set_attribute(CoreAttributes.ERROR_MESSAGE, error_message)
-
-                    # Attempt to set input/output attributes even on error if handler supports it
-                    try:
-                        attrs_on_error = attribute_handler(args=args, kwargs=kwargs, return_value=None, instance=instance)
-                        for k, v in attrs_on_error.items():
-                             span.set_attribute(k, v)
-                    except Exception as handler_e:
-                         logger.debug(f"Error setting attributes on error for agent run: {handler_e}")
-
-                    # Re-raise the exception
                     raise
                 finally:
-                    # Record duration metric
-                    end_time = time.time()
-                    duration = end_time - start_time
-                    if agent_run_duration:
-                         duration_attributes = {"status": status_code.name.lower()}
-                         if error_type:
-                             duration_attributes["error.type"] = error_type
-                         agent_run_duration.record(duration, attributes=duration_attributes)
 
-                    # Set final span status
                     span.set_status(Status(status_code, error_message))
-                    # Span is automatically ended by the 'with' statement
 
-            return return_value # Return the original result
-
-
+            return return_value
+       
         return _wrapper
     return wrapper
 
@@ -634,78 +660,123 @@ def _create_memory_query_wrapper(tracer: Tracer, metrics: Dict[str, Any]):
 
 def _create_provider_generate_wrapper(tracer: Tracer, metrics: Dict[str, Any]):
     """Factory for the BaseProvider.generate_response wrapper."""
-    # No specific metrics defined for BaseProvider.generate_response yet, but wrapper included for consistency
-    # LLM metrics are expected to be handled by the underlying LLM library instrumentors.
-
-    def wrapper(attribute_handler): # Accepts the attribute handler
+    
+    def wrapper(attribute_handler):
         def _wrapper(wrapped, instance, args, kwargs):
-            # Span name from instance type and model name
-            model_name = getattr(instance, 'model_name', getattr(instance, 'model', instance.__class__.__name__)) # Try to get model name
-            span_name = f"karo.provider.{instance.__class__.__name__}.generate_response ({model_name})"
-            attributes = {SpanAttributes.AALIYAH_SPAN_KIND: "llm", "karo.operation.type": "provider_generate_response"}
-            status_code = StatusCode.OK
-            error_message = None
-
-            with tracer.start_as_current_span(span_name, kind=SpanKind.CLIENT, attributes=attributes) as span:
-                start_time = time.time() # Still track duration locally if needed
-
-                try:
-                    # Set input attributes before execution
-                    input_attrs = attribute_handler(args=args, kwargs=kwargs, instance=instance)
-                    for k, v in input_attrs.items():
-                         span.set_attribute(k, v)
-
-                    # Call the original method
-                    return_value = wrapped(*args, **kwargs)
-
-                    # Set output attributes after execution
-                    output_attrs = attribute_handler(return_value=return_value, instance=instance)
-                    for k, v in output_attrs.items():
-                         span.set_attribute(k, v)
-
-                    # Determine status - BaseProvider.generate_response should ideally
-                    # raise exceptions on failure or return specific error types.
-                    # If it returns BaseOutputSchema, assume success.
-                    # If it returns other types (like raw tool calls), still assume success for this span.
-                    if isinstance(return_value, BaseToolOutputSchema): # Check for tool result (shouldn't happen in generate_response, but just in case)
-                         if not return_value.success:
-                             status_code = StatusCode.ERROR
-                             error_message = return_value.error_message
-                    # Add specific checks for provider error types if known
-
-                except Exception as e:
-                    status_code = StatusCode.ERROR
-                    error_message = str(e)
-
-                    # Record exception on span
-                    span.record_exception(e)
-                    span.set_attribute(CoreAttributes.ERROR_TYPE, e.__class__.__name__)
-                    span.set_attribute(CoreAttributes.ERROR_MESSAGE, error_message)
-
-                    # Attempt to set input/output attributes even on error
+            # Detect the specific provider type from the instance
+            provider_class_name = instance.__class__.__name__
+            model_name = instance.get_model_name() if hasattr(instance, 'get_model_name') else 'unknown'
+            
+            # Map Karo providers to their underlying LLM library instrumentors
+            karo_provider_map = {
+                "OpenAIProvider": {
+                    "instrumentor_module": "opentelemetry.instrumentation.openai",
+                    "instrumentor_class": "OpenAIInstrumentor",
+                    "llm_system": "openai",
+                    "skip_instrumentation": True  # Let OpenAI instrumentor handle it
+                },
+                "AnthropicProvider": {
+                    "instrumentor_module": "opentelemetry.instrumentation.anthropic", 
+                    "instrumentor_class": "AnthropicInstrumentor",
+                    "llm_system": "anthropic",
+                    "skip_instrumentation": True  # Let Anthropic instrumentor handle it
+                },
+                "GeminiProvider": {
+                    "instrumentor_module": "opentelemetry.instrumentation.google_generativeai",
+                    "instrumentor_class": "GoogleGenerativeAIInstrumentor", 
+                    "llm_system": "google_generativeai",
+                    "skip_instrumentation": True  # Let Google instrumentor handle it
+                },
+                "OllamaProvider": {
+                    "instrumentor_module": "opentelemetry.instrumentation.openai",
+                    "instrumentor_class": "OpenAIInstrumentor",
+                    "llm_system": "ollama", 
+                    "skip_instrumentation": True  # Uses OpenAI client, so OpenAI instrumentor handles it
+                }
+            }
+            
+            provider_info = karo_provider_map.get(provider_class_name)
+            
+            if provider_info and provider_info.get("skip_instrumentation"):
+                # Provider has dedicated instrumentor - create lightweight parent span
+                span_name = f"karo.provider.{provider_class_name}.generate_response"
+                attributes = {
+                    SpanAttributes.AALIYAH_SPAN_KIND: "llm",
+                    "karo.operation.type": "provider_generate_response",
+                    "karo.provider.class": provider_class_name,
+                    "karo.provider.system": provider_info["llm_system"],
+                    "karo.provider.model": model_name
+                }
+                
+                logger.debug(f"Creating lightweight Karo span for {provider_class_name}, "
+                           f"delegating LLM instrumentation to {provider_info['instrumentor_class']}")
+                
+                with tracer.start_as_current_span(span_name, kind=SpanKind.CLIENT, attributes=attributes) as span:
                     try:
-                        attrs_on_error = attribute_handler(args=args, kwargs=kwargs, return_value=None, instance=instance)
-                        for k, v in attrs_on_error.items():
-                             span.set_attribute(k, v)
-                    except Exception as handler_e:
-                         logger.debug(f"Error setting attributes on error for provider generate: {handler_e}")
-
-
-                    # Re-raise the exception
-                    raise
-                finally:
-                    # Record duration locally if needed
-                    end_time = time.time()
-                    duration = end_time - start_time
-                    # if provider_duration_histogram: # Example metric
-                    #      duration_attributes = {"status": status_code.name.lower()}
-                    #      provider_duration_histogram.record(duration, attributes=duration_attributes)
-
-                    # Set final span status
-                    span.set_status(Status(status_code, error_message))
-                    # Span is automatically ended by the 'with' statement
-
-            return return_value # Return the original result
-
+                        # Set Karo-specific input attributes
+                        input_attrs = attribute_handler(args=args, kwargs=kwargs, instance=instance)
+                        for k, v in input_attrs.items():
+                            span.set_attribute(k, v)
+                        
+                        # Call original method - provider's instrumentor creates detailed child spans
+                        return_value = wrapped(*args, **kwargs)
+                        
+                        # Set Karo-specific output attributes
+                        output_attrs = attribute_handler(return_value=return_value, instance=instance)
+                        for k, v in output_attrs.items():
+                            span.set_attribute(k, v)
+                            
+                        span.set_status(Status(StatusCode.OK))
+                        return return_value
+                        
+                    except Exception as e:
+                        span.record_exception(e)
+                        span.set_attribute(CoreAttributes.ERROR_TYPE, e.__class__.__name__)
+                        span.set_attribute(CoreAttributes.ERROR_MESSAGE, str(e))
+                        span.set_status(Status(StatusCode.ERROR, str(e)))
+                        raise
+            else:
+                # Unknown/custom provider - do full instrumentation
+                logger.debug(f"Fully instrumenting unknown provider: {provider_class_name}")
+                span_name = f"karo.provider.{provider_class_name}.generate_response"
+                attributes = {
+                    SpanAttributes.AALIYAH_SPAN_KIND: "llm",
+                    "karo.operation.type": "provider_generate_response",
+                    "karo.provider.class": provider_class_name,
+                    "karo.provider.system": "custom",
+                    "karo.provider.model": model_name
+                }
+                
+                with tracer.start_as_current_span(span_name, kind=SpanKind.CLIENT, attributes=attributes) as span:
+                    start_time = time.time()
+                    try:
+                        # Set input attributes
+                        input_attrs = attribute_handler(args=args, kwargs=kwargs, instance=instance)
+                        for k, v in input_attrs.items():
+                            span.set_attribute(k, v)
+                        
+                        # Call original method
+                        return_value = wrapped(*args, **kwargs)
+                        
+                        # Set output attributes
+                        output_attrs = attribute_handler(return_value=return_value, instance=instance)
+                        for k, v in output_attrs.items():
+                            span.set_attribute(k, v)
+                            
+                        # Record custom metrics for unknown providers
+                        duration = time.time() - start_time
+                        # Could add custom duration metrics here
+                        
+                        span.set_status(Status(StatusCode.OK))
+                        return return_value
+                        
+                    except Exception as e:
+                        span.record_exception(e)
+                        span.set_attribute(CoreAttributes.ERROR_TYPE, e.__class__.__name__)
+                        span.set_attribute(CoreAttributes.ERROR_MESSAGE, str(e))
+                        span.set_status(Status(StatusCode.ERROR, str(e)))
+                        raise
+        
         return _wrapper
     return wrapper
+

@@ -49,6 +49,7 @@ def init(
     api_key: Optional[str] = None,
     endpoint: Optional[str] = None,
     app_url: Optional[str] = None,
+    base_url: Optional[str] = None, 
     max_wait_time: Optional[int] = None,
     max_queue_size: Optional[int] = None,
     tags: Optional[List[str]] = None,
@@ -61,38 +62,42 @@ def init(
     log_level: Optional[Union[str, int]] = None,
     fail_safe: Optional[bool] = None,
     exporter_endpoint: Optional[str] = None,
-    agent_id: Optional[int] = None,  # 🔥 MAKE SURE THIS IS HERE
-    agent_name: Optional[str] = None,  # 🔥 MAKE SURE THIS IS HERE
+    metrics_endpoint: Optional[str] = None,  
+    logs_endpoint: Optional[str] = None,     
+    agent_id: Optional[int] = None,
+    agent_name: Optional[str] = None,
     **kwargs,
 ):
     """
     Initializes the Aaliyah SDK.
-
+    
     Args:
-        api_key (str, optional): API Key for Aaliyah services. If none is provided, key will
-            be read from the AALIYAH_API_KEY environment variable.
-        endpoint (str, optional): The endpoint for the Aaliyah service. If none is provided, key will
-            be read from the AALIYAH_API_ENDPOINT environment variable. Defaults to 'https://api.mensterra.com'.
-        app_url (str, optional): The dashboard URL for the Aaliyah app. If none is provided, key will
-            be read from the AALIYAH_APP_URL environment variable. Defaults to 'https://app.mensterra.com'.
-        max_wait_time (int, optional): The maximum time to wait in milliseconds before flushing the queue.
-            Defaults to 5,000 (5 seconds)
-        max_queue_size (int, optional): The maximum size of the event queue. Defaults to 512.
-        tags (List[str], optional): [Deprecated] Use `default_tags` instead.
-        default_tags (List[str], optional): Default tags for the sessions that can be used for grouping or sorting later (e.g. ["GPT-4"]).
-        instrument_llm_calls (bool): Whether to instrument LLM calls and emit LLMEvents.
-        auto_start_session (bool): Whether to start a session automatically when the client is created.
-        auto_init (bool): Whether to automatically initialize the client on import. Defaults to True.
-        skip_auto_end_session (optional, bool): Don't automatically end session based on your framework's decision-making
-            (i.e. Crew determining when tasks are complete and ending the session)
-        env_data_opt_out (bool): Whether to opt out of collecting environment data.
-        log_level (str, int): The log level to use for the client. Defaults to 'CRITICAL'.
-        fail_safe (bool): Whether to suppress errors and continue execution when possible.
-        exporter_endpoint (str, optional): Endpoint for the exporter. If none is provided, key will
-            be read from the AALIYAH_EXPORTER_ENDPOINT environment variable.
-        **kwargs: Additional configuration parameters to be passed to the client.
+        base_url (str, optional): Base URL for all endpoints. Defaults to 'https://api.mensterra.com'.
+        metrics_endpoint (str, optional): Endpoint for metrics. Auto-constructed from base_url if not provided.
+        logs_endpoint (str, optional): Endpoint for logs. Auto-constructed from base_url if not provided.
+        # ... rest of your existing docstring
     """
     global _client
+
+    # Set default base URL if not provided
+    if base_url is None:
+        base_url = "https://api.mensterra.com"
+    
+    # Construct endpoints from base_url if not explicitly provided
+    if endpoint is None:
+        endpoint = base_url
+    
+    if app_url is None:
+        app_url = base_url.replace("api.", "app.")
+    
+    if exporter_endpoint is None:
+        exporter_endpoint = f"{base_url}/v1/traces"
+    
+    if metrics_endpoint is None:
+        metrics_endpoint = f"{base_url}/v1/metrics"
+    
+    if logs_endpoint is None:
+        logs_endpoint = f"{base_url}/v1/logs/upload/"
 
     # Merge tags and default_tags if both are provided
     merged_tags = None
@@ -118,12 +123,12 @@ def init(
         log_level=log_level,
         fail_safe=fail_safe,
         exporter_endpoint=exporter_endpoint,
-        agent_id=agent_id,  # 🔥 MAKE SURE THIS IS HERE
-        agent_name=agent_name,  # 🔥 MAKE SURE THIS IS HERE
+        metrics_endpoint=metrics_endpoint,  
+        logs_endpoint=logs_endpoint,        
+        agent_id=agent_id,
+        agent_name=agent_name,
         **kwargs,
     )
-
-
 def configure(**kwargs):
     """Update client configuration
 
@@ -150,8 +155,9 @@ def configure(**kwargs):
     # List of valid parameters that can be passed to configure
     valid_params = {
         "api_key",
-        "endpoint",
+        "endpoint", 
         "app_url",
+        "base_url",           
         "max_wait_time",
         "max_queue_size",
         "default_tags",
@@ -164,13 +170,32 @@ def configure(**kwargs):
         "exporter",
         "processor",
         "exporter_endpoint",
+        "metrics_endpoint",   
+        "logs_endpoint",      
+        "agent_id",          
+        "agent_name",        
     }
+
+    # Handle base_url logic if provided
+    if "base_url" in kwargs:
+        base_url = kwargs.pop("base_url")
+        
+        # Auto-construct missing endpoints
+        if "endpoint" not in kwargs:
+            kwargs["endpoint"] = base_url
+        if "app_url" not in kwargs:
+            kwargs["app_url"] = base_url.replace("api.", "app.")
+        if "exporter_endpoint" not in kwargs:
+            kwargs["exporter_endpoint"] = f"{base_url}/v1/traces"
+        if "metrics_endpoint" not in kwargs:
+            kwargs["metrics_endpoint"] = f"{base_url}/v1/metrics"
+        if "logs_endpoint" not in kwargs:
+            kwargs["logs_endpoint"] = f"{base_url}/v1/logs/upload/"
 
     # Check for invalid parameters
     invalid_params = set(kwargs.keys()) - valid_params
     if invalid_params:
         from .logging.config import logger
-
         logger.warning(f"Invalid configuration parameters: {invalid_params}")
 
     _client.configure(**kwargs)

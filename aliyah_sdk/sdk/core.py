@@ -240,43 +240,34 @@ class TracingCore:
         """
         Initialize the tracing core with the given configuration instance.
         """
-        print("DEBUG TracingCore.initialize: Start") # Debug print
+        
         if self._initialized:
-            print("DEBUG TracingCore.initialize: Already initialized, skipping.") # Debug print
+        
             return
 
         with self._lock:
             if self._initialized:
-                print("DEBUG TracingCore.initialize: Already initialized (in lock), skipping.") # Debug print
+         
                 return
 
-            print(f"DEBUG TracingCore.initialize: Received config instance type: {type(config_instance)}") # Debug print
-            # Check for expected attributes on the config instance
-            print(f"DEBUG TracingCore.initialize: config_instance has 'api_key': {hasattr(config_instance, 'api_key')}") # Debug print
+           
             if hasattr(config_instance, 'api_key'):
-                print(f"DEBUG TracingCore.initialize: config_instance.api_key type: {type(config_instance.api_key)}") # Debug print
-                print(f"DEBUG TracingCore.initialize: config_instance.api_key: '{config_instance.api_key}'") # Debug print
-            # Check other attributes
-            print(f"DEBUG TracingCore.initialize: config_instance has 'exporter_endpoint': {hasattr(config_instance, 'exporter_endpoint')}") # Debug print
+                print(f"DEBUG TracingCore.initialize: config_instance.api_key type: {type(config_instance.api_key)}")
+            
             if hasattr(config_instance, 'exporter_endpoint'):
-                print(f"DEBUG TracingCore.initialize: config_instance.exporter_endpoint: '{config_instance.exporter_endpoint}'") # Debug print
+                print(f"DEBUG TracingCore.initialize: config_instance.exporter_endpoint: '{config_instance.exporter_endpoint}'")
 
-            # 🔥 ADD DEBUG FOR AGENT INFO
-            print(f"DEBUG TracingCore.initialize: agent_id: {agent_id}") # Debug print
-            print(f"DEBUG TracingCore.initialize: agent_name: {agent_name}") # Debug print
+            self._config = config_instance
 
-            self._config = config_instance # Store the Config instance
-
-            # Use attributes from the config *instance* for setup_telemetry
-            # Provide default values using Config.ATTRIBUTE in case the instance attribute is None
-            service_name = getattr(config_instance, 'service_name', 'aliyah') # Default service name
+            # Use attributes from the config instance for setup_telemetry
+            service_name = getattr(config_instance, 'service_name', 'aliyah')
             exporter_endpoint = getattr(config_instance, 'exporter_endpoint', Config.EXPORTER_ENDPOINT)
             metrics_endpoint = getattr(config_instance, 'metrics_endpoint', Config.METRICS_ENDPOINT)
             max_queue_size = getattr(config_instance, 'max_queue_size', Config.MAX_QUEUE_SIZE)
             max_wait_time = getattr(config_instance, 'max_wait_time', Config.MAX_WAIT_TIME)
             export_flush_interval = getattr(config_instance, 'export_flush_interval', Config.EXPORT_FLUSH_INTERVAL)
 
-            print("DEBUG TracingCore.initialize: Calling setup_telemetry...") # Debug print
+
             self._provider, self._meter_provider = setup_telemetry(
                 service_name=service_name,
                 project_id=project_id,
@@ -286,12 +277,73 @@ class TracingCore:
                 max_wait_time=max_wait_time,
                 export_flush_interval=export_flush_interval,
                 jwt=jwt,
-                agent_id=agent_id,  # 🔥 NOW THESE ARE DEFINED
-                agent_name=agent_name  # 🔥 NOW THESE ARE DEFINED
+                agent_id=agent_id,
+                agent_name=agent_name
             )
 
+            # 🔥 NEW: Enable instrumentors if instrument_llm_calls is True
+            if getattr(config_instance, 'instrument_llm_calls', False):
+                
+                self._enable_llm_instrumentors()
+            else:
+                print("DEBUG TracingCore.initialize: instrument_llm_calls=False, skipping instrumentors")
+
             self._initialized = True
-            print("DEBUG TracingCore.initialize: Tracing core initialized.") # Debug print
+            
+
+    def _enable_llm_instrumentors(self):
+        """Enable LLM framework instrumentors when instrument_llm_calls=True."""
+        
+        # List of instrumentors to try enabling (order matters - Karo first for smart detection)
+        instrumentors_to_enable = [
+            # Karo framework instrumentor (highest priority - provides smart provider detection)
+            ("aliyah_sdk.instrumentation.karo", "KaroInstrumentor"),
+            # Direct LLM provider instrumentors (fallback for non-Karo usage)
+            ("opentelemetry.instrumentation.openai", "OpenAIInstrumentor"),
+            ("opentelemetry.instrumentation.anthropic", "AnthropicInstrumentor"),
+            ("opentelemetry.instrumentation.google_generativeai", "GoogleGenerativeAIInstrumentor"),
+        ]
+        
+        enabled_count = 0
+        
+        for module_name, class_name in instrumentors_to_enable:
+            try:
+                # Dynamic import of the instrumentor
+                module = __import__(module_name, fromlist=[class_name])
+                instrumentor_class = getattr(module, class_name)
+                instrumentor = instrumentor_class()
+                
+                # Check if already instrumented
+                if not instrumentor.is_instrumented_by_opentelemetry:
+                    instrumentor.instrument(
+                        tracer_provider=self._provider,
+                        meter_provider=self._meter_provider
+                    )
+                    provider_name = class_name.replace("Instrumentor", "")
+                    
+                    logger.debug(f"Successfully enabled {provider_name} instrumentor")
+                    enabled_count += 1
+                else:
+                    provider_name = class_name.replace("Instrumentor", "")
+                    
+                    logger.debug(f"{provider_name} instrumentor was already enabled")
+                    
+            except ImportError:
+                provider_name = class_name.replace("Instrumentor", "")
+                
+                logger.debug(f"{provider_name} instrumentation package not found")
+            except Exception as e:
+                provider_name = class_name.replace("Instrumentor", "")
+                
+                logger.warning(f"Failed to enable {provider_name} instrumentation: {e}")
+        
+        if enabled_count > 0:
+            
+            logger.info(f"Successfully enabled {enabled_count} LLM instrumentors")
+        else:
+
+            logger.warning("No LLM instrumentors were enabled - check package installations")
+
 
     @property
     def initialized(self) -> bool:
@@ -308,15 +360,15 @@ class TracingCore:
 
     def shutdown(self) -> None:
         """Shutdown the tracing core."""
-        print("DEBUG TracingCore.shutdown: Start") # Debug print
+       
         with self._lock:
             if not self._initialized or self._config is None:
-                print("DEBUG TracingCore.shutdown: Not initialized, skipping.") # Debug print
+                
                 return
-            print("DEBUG TracingCore.shutdown: Flushing spans...") # Debug print
+            
             self._provider._active_span_processor.force_flush(self._config.max_wait_time) # type: ignore
 
-            print("DEBUG TracingCore.shutdown: Shutting down provider...") # Debug print
+            
             if self._provider:
                 try:
                     self._provider.shutdown()
@@ -324,7 +376,7 @@ class TracingCore:
                 except Exception as e:
                     logger.warning(f"Error shutting down provider: {e}")
 
-            print("DEBUG TracingCore.shutdown: Shutting down meter provider...") # Debug print
+            
             if self._meter_provider:
                  try:
                       self._meter_provider.shutdown()
@@ -334,7 +386,9 @@ class TracingCore:
 
 
             self._initialized = False
-            print("DEBUG TracingCore.shutdown: Tracing core shutdown complete.") # Debug print
+            
+
+            
 
     @classmethod
     def initialize_from_config(cls, config_instance: Config, **kwargs):
