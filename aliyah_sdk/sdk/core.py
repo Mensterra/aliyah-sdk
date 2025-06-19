@@ -5,6 +5,7 @@ import threading
 import platform
 import sys
 import os
+import time
 import psutil
 from typing import Optional
 
@@ -17,6 +18,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry import context as context_api
+import requests
 
 
 from aliyah_sdk.config import Config
@@ -28,6 +30,133 @@ from aliyah_sdk.semconv import ResourceAttributes
 
 # No need to create shortcuts since we're using our own ResourceAttributes class now
 
+class ShutdownMonitoringProcessor(BatchSpanProcessor):
+    """
+    Custom span processor that monitors HTTP responses for shutdown signals.
+    This wraps the existing OTLP exporter to intercept responses.
+    """
+    
+    def __init__(self, span_exporter, **kwargs):
+        try:
+            # Call parent constructor with the span_exporter
+            super().__init__(span_exporter, **kwargs)
+            self._shutdown_detected = False
+            
+            # Store reference to the exporter
+            self.span_exporter = span_exporter
+            self._original_export = span_exporter.export
+            
+            # Wrap the exporter's export method
+            span_exporter.export = self._export_with_monitoring
+            
+            logger.debug("ShutdownMonitoringProcessor initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing ShutdownMonitoringProcessor: {e}")
+            raise
+    
+    def _export_with_monitoring(self, spans):
+        """Export spans and monitor response for shutdown signals"""
+        try:
+            # Call the original export method
+            result = self._original_export(spans)
+            
+            # Try to access the HTTP response if available
+            # This is a bit hacky but works with the current OTLP exporter structure
+            if hasattr(self.span_exporter, '_session'):
+                session = self.span_exporter._session
+                
+                # Check if there's a recent response
+                if hasattr(session, 'last_response') and session.last_response:
+                    response = session.last_response
+                    self._check_response_for_shutdown(response)
+                
+                # Alternative: monkey patch the session to capture responses
+                elif not hasattr(session, '_shutdown_monitoring_patched'):
+                    self._patch_session_for_monitoring(session)
+            
+            return result
+            
+        except Exception as e:
+            logger.debug(f"Error in shutdown monitoring: {e}")
+            return self._original_export(spans)
+    
+    def _patch_session_for_monitoring(self, session):
+        """Patch the requests session to capture responses"""
+        try:
+            original_request = session.request
+            
+            def monitored_request(*args, **kwargs):
+                response = original_request(*args, **kwargs)
+                session.last_response = response
+                self._check_response_for_shutdown(response)
+                return response
+            
+            session.request = monitored_request
+            session._shutdown_monitoring_patched = True
+            
+        except Exception as e:
+            logger.debug(f"Error patching session: {e}")
+    
+    def _check_response_for_shutdown(self, response):
+        """Check HTTP response for shutdown signals"""
+        try:
+            if not hasattr(response, 'headers'):
+                return
+                
+            agent_status = response.headers.get('X-Agent-Status', '').lower()
+            agent_action = response.headers.get('X-Agent-Action', '').lower()
+            
+            # Check for shutdown signals
+            if (agent_status == 'shutdown' or 
+                agent_action == 'terminate' or 
+                response.status_code == 202):
+                
+                if not self._shutdown_detected:
+                    self._shutdown_detected = True
+                    logger.critical("🛑 AGENT SHUTDOWN SIGNAL RECEIVED FROM BACKEND")
+                    
+                    # Trigger immediate shutdown in a separate thread to avoid blocking
+                    import threading
+                    shutdown_thread = threading.Thread(
+                        target=self._handle_shutdown_signal,
+                        daemon=True
+                    )
+                    shutdown_thread.start()
+                    
+        except Exception as e:
+            logger.debug(f"Error checking response for shutdown: {e}")
+    
+    def _handle_shutdown_signal(self):
+        """Handle shutdown signal from backend"""
+        try:
+            # End any active sessions immediately
+            self._emergency_cleanup()
+            
+            # Force terminate the application
+            logger.critical("🛑 TERMINATING APPLICATION DUE TO BACKEND SHUTDOWN SIGNAL")
+            time.sleep(0.1)  # Brief moment for logs
+            os._exit(1)  # Immediate termination
+            
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+            os._exit(1)  # Force exit even if cleanup fails
+    
+    def _emergency_cleanup(self):
+        """Emergency cleanup before shutdown"""
+        try:
+            # Import here to avoid circular imports
+            import aliyah_sdk.client.client as client_module
+            
+            if hasattr(client_module, '_active_session') and client_module._active_session:
+                from aliyah_sdk.sessions import end_session
+                end_session(
+                    client_module._active_session,
+                    end_state="Shutdown",
+                    end_state_reason="Backend shutdown signal received"
+                )
+        except Exception as e:
+            logger.error(f"Error during emergency cleanup: {e}")
 
 def get_imported_libraries():
     """
@@ -115,45 +244,27 @@ def setup_telemetry(
     max_wait_time: int = Config.MAX_WAIT_TIME, 
     export_flush_interval: int = Config.EXPORT_FLUSH_INTERVAL,
     jwt: Optional[str] = None,
-    agent_id: Optional[int] = None,  # 🔥 ADD THIS
-    agent_name: Optional[str] = None,  # 🔥 ADD THIS
+    agent_id: Optional[int] = None,     # ADD THIS
+    agent_name: Optional[str] = None,   # ADD THIS
 ) -> tuple[TracerProvider, MeterProvider]:
-    """
-    Setup the telemetry system.
-
-    Args:
-        service_name: Name of the OpenTelemetry service
-        project_id: Project ID to include in resource attributes
-        exporter_endpoint: Endpoint for the span exporter
-        metrics_endpoint: Endpoint for the metrics exporter
-        max_queue_size: Maximum number of spans to queue before forcing a flush
-        max_wait_time: Maximum time in milliseconds to wait before flushing
-        export_flush_interval: Time interval in milliseconds between automatic exports of telemetry data
-        jwt: JWT token for authentication
-        agent_id: ID of the agent instance for linking traces
-        agent_name: Name of the agent instance for better identification
-
-    Returns:
-        Tuple of (TracerProvider, MeterProvider)
-    """
+    """Setup telemetry with enhanced monitoring"""
+    
     # Create resource attributes dictionary
     resource_attrs = {ResourceAttributes.SERVICE_NAME: service_name}
 
-    # Add project_id to resource attributes if available
     if project_id:
         resource_attrs[ResourceAttributes.PROJECT_ID] = project_id
         logger.debug(f"Including project_id in resource attributes: {project_id}")
 
-    # 🔥 ADD AGENT ATTRIBUTES TO RESOURCE
     if agent_id is not None:
         resource_attrs["agent.id"] = str(agent_id)
         logger.debug(f"Including agent_id in resource attributes: {agent_id}")
-        print(f"DEBUG setup_telemetry: Adding agent.id to resource: {agent_id}")  # Debug print
-    
+        print(f"DEBUG setup_telemetry: Adding agent.id to resource: {agent_id}")
+
     if agent_name:
         resource_attrs["agent.name"] = agent_name
         logger.debug(f"Including agent_name in resource attributes: {agent_name}")
-        print(f"DEBUG setup_telemetry: Adding agent.name to resource: {agent_name}")  # Debug print
+        print(f"DEBUG setup_telemetry: Adding agent.name to resource: {agent_name}")
 
     # Add system information
     system_stats = get_system_stats()
@@ -163,41 +274,59 @@ def setup_telemetry(
     imported_libraries = get_imported_libraries()
     resource_attrs[ResourceAttributes.IMPORTED_LIBRARIES] = imported_libraries
 
-    # 🔥 DEBUG: Print all resource attributes
-    print(f"DEBUG setup_telemetry: Final resource attributes: {resource_attrs}")
-
     resource = Resource(resource_attrs)
     provider = TracerProvider(resource=resource)
-
-    # Set as global provider
     trace.set_tracer_provider(provider)
 
-    # Create exporter with authentication
-    exporter = OTLPSpanExporter(endpoint=exporter_endpoint, headers={"X-API-Key": jwt} if jwt else {})
+    try:
+        # Use regular OTLP exporter
+        logger.debug(f"Creating OTLP exporter for endpoint: {exporter_endpoint}")
+        exporter = OTLPSpanExporter(
+            endpoint=exporter_endpoint, 
+            headers={"X-API-Key": jwt} if jwt else {}
+        )
+        logger.debug("OTLP exporter created successfully")
 
-    # Regular processor for normal spans and immediate export
-    processor = BatchSpanProcessor(
-        exporter,
-        max_export_batch_size=max_queue_size,
-        schedule_delay_millis=export_flush_interval,
-    )
-    provider.add_span_processor(processor)
-    provider.add_span_processor(InternalSpanProcessor())  # Catches spans for Aaliyah on-terminal printing
+        # Use enhanced processor that monitors responses
+        logger.debug("Creating ShutdownMonitoringProcessor...")
+        processor = ShutdownMonitoringProcessor(
+            exporter,
+            max_export_batch_size=max_queue_size,
+            schedule_delay_millis=export_flush_interval,
+        )
+        logger.debug("ShutdownMonitoringProcessor created successfully")
+        
+        provider.add_span_processor(processor)
+        provider.add_span_processor(InternalSpanProcessor())
+        
+    except Exception as e:
+        logger.error(f"Error setting up shutdown monitoring processor: {e}")
+        # Fallback to regular processor if monitoring fails
+        logger.warning("Falling back to regular BatchSpanProcessor without shutdown monitoring")
+        
+        exporter = OTLPSpanExporter(
+            endpoint=exporter_endpoint, 
+            headers={"X-API-Key": jwt} if jwt else {}
+        )
+        
+        processor = BatchSpanProcessor(
+            exporter,
+            max_export_batch_size=max_queue_size,
+            schedule_delay_millis=export_flush_interval,
+        )
+        provider.add_span_processor(processor)
+        provider.add_span_processor(InternalSpanProcessor())
 
-    # Setup metrics
+    # Setup metrics (regular OTLP exporter)
     metric_reader = PeriodicExportingMetricReader(
         OTLPMetricExporter(endpoint=metrics_endpoint, headers={"X-API-Key": jwt} if jwt else {})
     )
     meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     metrics.set_meter_provider(meter_provider)
 
-    ### Logging
     setup_print_logger()
-
-    # Initialize root context
     context_api.get_current()
-
-    logger.debug("Telemetry system initialized")
+    logger.debug("Telemetry system initialized with shutdown monitoring")
 
     return provider, meter_provider
 
@@ -463,3 +592,5 @@ class TracingCore:
 
     #     # Span types are registered in the constructor
     #     # No need to register them here anymore
+
+

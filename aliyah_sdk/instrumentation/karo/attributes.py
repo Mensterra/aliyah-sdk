@@ -251,6 +251,9 @@ def get_memory_add_attributes(
     attributes[SpanAttributes.AALIYAH_SPAN_KIND] = "memory" # Custom kind or map to CLIENT
     attributes["karo.operation.type"] = "memory_add"
 
+    if kwargs is None:
+        kwargs = {}
+
     # Input arguments (text, metadata, memory_id, importance_score)
     # Check kwargs first as they are often used
     text = kwargs.get('text') or (args[0] if args and len(args) > 0 else None)
@@ -280,12 +283,17 @@ def get_memory_add_attributes(
 
 def get_memory_query_attributes(
     args: Optional[Tuple] = None, kwargs: Optional[Dict[str, Any]] = None, return_value: Optional[Any] = None, instance: Optional[MemoryManager] = None
+    
 ) -> AttributeMap:
     """Extract attributes for MemoryManager.retrieve_relevant_memories method calls."""
     attributes = get_common_instrumentation_attributes()
     attributes.update(get_memory_manager_attributes(instance))
     attributes[SpanAttributes.AALIYAH_SPAN_KIND] = "memory" # Custom kind or map to CLIENT
     attributes["karo.operation.type"] = "memory_query"
+
+    # Handle None kwargs - ADD THIS LINE
+    if kwargs is None:
+        kwargs = {}
 
     # Input arguments (query_text, n_results, where_filter)
     # Check kwargs first

@@ -20,8 +20,7 @@ def _end_active_session():
     if _active_session is not None:
         logger.debug("Auto-ending active session during shutdown")
         try:
-            from aliyah_sdk.legacy import end_session
-
+            from aliyah_sdk.sessions import end_session
             end_session(_active_session)
         except Exception as e:
             logger.warning(f"Error ending active session during shutdown: {e}")
@@ -97,12 +96,14 @@ class Client:
 
             global _atexit_registered
             if not _atexit_registered:
+                # FIXED: Register the function that handles active sessions
+                atexit.register(_end_active_session)
                 atexit.register(self.shutdown)
                 _atexit_registered = True
 
             session = None
             if self.config.auto_start_session:
-                from aliyah_sdk.legacy import start_session  # Fixed import
+                from aliyah_sdk.sessions import start_session  # Fixed import
 
                 # Include agent_id and agent_name in session tags
                 session_tags = list(self.config.default_tags) if self.config.default_tags else []
@@ -127,10 +128,22 @@ class Client:
         self.config.configure(**kwargs)
 
     def shutdown(self):
-        print("DEBUG Client.shutdown: Shutting down TracingCore...") # Debug print
+        """Shutdown the client and end any active sessions"""
+        print("DEBUG Client.shutdown: Shutting down TracingCore...")
+        
+        # FIXED: End active session before shutting down TracingCore
+        global _active_session
+        if _active_session is not None:
+            try:
+                from aliyah_sdk.sessions import end_session
+                print("DEBUG Client.shutdown: Ending active session...")
+                end_session(_active_session)
+                _active_session = None
+            except Exception as e:
+                print(f"DEBUG Client.shutdown: Error ending session: {e}")
+        
         TracingCore.get_instance().shutdown()
-        # Add any other client-level cleanup here
-        print("DEBUG Client.shutdown: Client shutdown complete.") # Debug print
+        print("DEBUG Client.shutdown: Client shutdown complete.")
 
     @property
     def initialized(self) -> bool:
@@ -141,6 +154,3 @@ class Client:
         if self._initialized and self._initialized != value:
             raise ValueError("Client already initialized")
         self._initialized = value
-
-    # ------------------------------------------------------------
-    __instance = None

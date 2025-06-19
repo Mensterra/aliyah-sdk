@@ -1,20 +1,5 @@
-
-from aliyah_sdk.legacy import (
-        start_session,
-    end_session,
-    track_agent,
-    track_tool,
-    end_all_sessions,
-    Session,
-    ToolEvent,
-    ErrorEvent,
-    ActionEvent,
-    LLMEvent,
-)
-
 from typing import List, Optional, Union
 from aliyah_sdk.client import Client
-
 
 # Client global instance; one per process runtime
 _client = Client()
@@ -23,26 +8,7 @@ _client = Client()
 def get_client() -> Client:
     """Get the singleton client instance"""
     global _client
-
     return _client
-
-
-def record(event):
-    """
-    Legacy function to record an event. This is kept for backward compatibility.
-
-    In the current version, this simply sets the end_timestamp on the event.
-
-    Args:
-        event: The event to record
-    """
-    from aliyah_sdk.helpers.time import get_ISO_time
-
-    # TODO: Manual timestamp assignment is a temporary fix; should use proper event lifecycle
-    if event and hasattr(event, "end_timestamp"):
-        event.end_timestamp = get_ISO_time()
-
-    return event
 
 
 def init(
@@ -69,13 +35,29 @@ def init(
     **kwargs,
 ):
     """
-    Initializes the Aaliyah SDK.
+    Initializes the Aliyah SDK.
     
     Args:
+        api_key (str, optional): API Key for Aliyah services. Can also be set via ALIYAH_API_KEY env var.
         base_url (str, optional): Base URL for all endpoints. Defaults to 'https://api.mensterra.com'.
-        metrics_endpoint (str, optional): Endpoint for metrics. Auto-constructed from base_url if not provided.
-        logs_endpoint (str, optional): Endpoint for logs. Auto-constructed from base_url if not provided.
-        # ... rest of your existing docstring
+        endpoint (str, optional): Main API endpoint. Auto-constructed from base_url if not provided.
+        app_url (str, optional): Dashboard URL. Auto-constructed from base_url if not provided.
+        exporter_endpoint (str, optional): Traces endpoint. Auto-constructed from base_url if not provided.
+        metrics_endpoint (str, optional): Metrics endpoint. Auto-constructed from base_url if not provided.
+        logs_endpoint (str, optional): Logs endpoint. Auto-constructed from base_url if not provided.
+        agent_id (int, optional): Unique identifier for your agent/application.
+        agent_name (str, optional): Human-readable name for your agent/application.
+        instrument_llm_calls (bool, optional): Enable automatic LLM call tracing. Defaults to True.
+        auto_start_session (bool, optional): Automatically start a session on init. Defaults to False.
+        default_tags (List[str], optional): Default tags to apply to all sessions.
+        max_wait_time (int, optional): Maximum time to wait before flushing traces (ms).
+        max_queue_size (int, optional): Maximum number of traces to queue.
+        log_level (str|int, optional): Logging level for the SDK.
+        fail_safe (bool, optional): Suppress errors and continue execution if True.
+        **kwargs: Additional configuration parameters.
+        
+    Returns:
+        Session object if auto_start_session=True, None otherwise.
     """
     global _client
 
@@ -129,14 +111,18 @@ def init(
         agent_name=agent_name,
         **kwargs,
     )
+
+
 def configure(**kwargs):
-    """Update client configuration
+    """
+    Update client configuration after initialization.
 
     Args:
         **kwargs: Configuration parameters. Supported parameters include:
-            - api_key: API Key for Aaliyah services
-            - endpoint: The endpoint for the Aaliyah service
-            - app_url: The dashboard URL for the Aaliyah app
+            - api_key: API Key for Aliyah services
+            - endpoint: The endpoint for the Aliyah service
+            - app_url: The dashboard URL for the Aliyah app
+            - base_url: Base URL that auto-constructs other endpoints
             - max_wait_time: Maximum time to wait in milliseconds before flushing the queue
             - max_queue_size: Maximum size of the event queue
             - default_tags: Default tags for the sessions
@@ -146,9 +132,11 @@ def configure(**kwargs):
             - env_data_opt_out: Whether to opt out of collecting environment data
             - log_level: The log level to use for the client
             - fail_safe: Whether to suppress errors and continue execution
-            - exporter: Custom span exporter for OpenTelemetry trace data
-            - processor: Custom span processor for OpenTelemetry trace data
-            - exporter_endpoint: Endpoint for the exporter
+            - exporter_endpoint: Endpoint for trace data
+            - metrics_endpoint: Endpoint for metrics data
+            - logs_endpoint: Endpoint for logs data
+            - agent_id: Agent identifier
+            - agent_name: Agent name
     """
     global _client
 
@@ -201,19 +189,40 @@ def configure(**kwargs):
     _client.configure(**kwargs)
 
 
+# Optional session management for advanced use cases
+def start_session(tags: Optional[List[str]] = None):
+    """
+    Start a new tracing session (optional - use for granular session control).
+    
+    Most users should use auto_start_session=True in init() instead.
+    
+    Args:
+        tags: Optional tags to attach to the session for filtering
+        
+    Returns:
+        Session object that should be passed to end_session()
+    """
+    from aliyah_sdk.sessions import start_session as _start_session
+    return _start_session(tags=tags)
+
+
+def end_session(session=None, **kwargs):
+    """
+    End a tracing session (optional - use with start_session()).
+    
+    Args:
+        session: Session object returned by start_session()
+        **kwargs: Additional session metadata (end_state, end_state_reason, etc.)
+    """
+    from aliyah_sdk.sessions import end_session as _end_session
+    return _end_session(session, **kwargs)
+
+
+# Export only the modern, non-deprecated API
 __all__ = [
     "init",
-    "configure",
+    "configure", 
     "get_client",
-    "record",
     "start_session",
     "end_session",
-    "track_agent",
-    "track_tool",
-    "end_all_sessions",
-    "Session",
-    "ToolEvent",
-    "ErrorEvent",
-    "ActionEvent",
-    "LLMEvent",
 ]
